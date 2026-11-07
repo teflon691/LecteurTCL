@@ -1,0 +1,268 @@
+name: Compiler l'APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Écrire le projet
+        run: |
+          cat > settings.gradle.kts <<'FIN_DU_FICHIER'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "LecteurTCL"
+          include(":app")
+          FIN_DU_FICHIER
+          cat > build.gradle.kts <<'FIN_DU_FICHIER'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          FIN_DU_FICHIER
+          cat > gradle.properties <<'FIN_DU_FICHIER'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          kotlin.code.style=official
+          FIN_DU_FICHIER
+          mkdir -p app
+          cat > app/build.gradle.kts <<'FIN_DU_FICHIER'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "fr.perso.lecteurtcl"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "fr.perso.lecteurtcl"
+                  minSdk = 24
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "0.1"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          FIN_DU_FICHIER
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'FIN_DU_FICHIER'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.NFC" />
+              <uses-feature android:name="android.hardware.nfc" android:required="true" />
+
+              <application
+                  android:label="Lecteur TCL"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          FIN_DU_FICHIER
+          mkdir -p app/src/main/java/fr/perso/lecteurtcl
+          cat > app/src/main/java/fr/perso/lecteurtcl/MainActivity.kt <<'FIN_DU_FICHIER'
+          package fr.perso.lecteurtcl
+
+          import android.app.Activity
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.graphics.Typeface
+          import android.nfc.NfcAdapter
+          import android.nfc.Tag
+          import android.nfc.tech.IsoDep
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity(), NfcAdapter.ReaderCallback {
+
+              private var nfc: NfcAdapter? = null
+              private lateinit var output: TextView
+
+              // AID de l'application billettique Calypso "1TIC.ICA"
+              private val aidCalypso = hex("315449432E494341")
+
+              private val fichiers = linkedMapOf(
+                  0x19 to "Compteurs (global)",
+                  0x0A to "Compteur 1",
+                  0x0B to "Compteur 2",
+                  0x0C to "Compteur 3",
+                  0x0D to "Compteur 4",
+                  0x09 to "Contrats",
+                  0x1E to "Liste des contrats",
+                  0x07 to "Environnement",
+                  0x08 to "Dernières validations",
+              )
+              private val sfiCompteurs = setOf(0x19, 0x0A, 0x0B, 0x0C, 0x0D)
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  nfc = NfcAdapter.getDefaultAdapter(this)
+
+                  output = TextView(this).apply {
+                      typeface = Typeface.MONOSPACE
+                      textSize = 12f
+                      setTextIsSelectable(true)
+                      setPadding(32, 32, 32, 32)
+                      text = when {
+                          nfc == null -> "Ce téléphone n'a pas de NFC."
+                          nfc?.isEnabled == false -> "Active le NFC dans les paramètres, puis reviens ici."
+                          else -> "Pose ta carte TCL au dos du téléphone…"
+                      }
+                  }
+                  val copier = Button(this).apply {
+                      text = "Copier le résultat"
+                      setOnClickListener {
+                          val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                          cm.setPrimaryClip(ClipData.newPlainText("Lecture TCL", output.text))
+                          Toast.makeText(this@MainActivity, "Copié", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+                  setContentView(LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(0, 48, 0, 0)
+                      addView(copier)
+                      addView(ScrollView(this@MainActivity).apply { addView(output) })
+                  })
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  nfc?.enableReaderMode(
+                      this, this,
+                      NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B or
+                          NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                      null
+                  )
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  nfc?.disableReaderMode(this)
+              }
+
+              override fun onTagDiscovered(tag: Tag) {
+                  val rapport = StringBuilder()
+                  try {
+                      lireCarte(tag, rapport)
+                  } catch (e: Exception) {
+                      rapport.append("\nERREUR : ${e.message}\n(Garde la carte bien immobile et réessaie.)")
+                  }
+                  runOnUiThread { output.text = rapport.toString() }
+              }
+
+              private fun lireCarte(tag: Tag, r: StringBuilder) {
+                  r.append("UID : ${tag.id.toHex()}\n")
+                  r.append("Technos : ${tag.techList.joinToString { it.substringAfterLast('.') }}\n")
+
+                  val iso = IsoDep.get(tag) ?: run {
+                      r.append("\nCarte non ISO-DEP : ce n'est pas une carte Calypso.")
+                      return
+                  }
+                  iso.connect()
+                  iso.timeout = 5000
+                  iso.use {
+                      for (cla in listOf(0x00, 0x94)) {
+                          r.append("\n===== Classe ${"%02X".format(cla)} =====\n")
+                          val sel = it.transceive(byteArrayOf(cla.toByte(), 0xA4.toByte(), 0x04, 0x00,
+                              aidCalypso.size.toByte()) + aidCalypso + byteArrayOf(0x00))
+                          r.append("Sélection appli : ${sw(sel)}\n")
+
+                          var auMoinsUnOk = false
+                          for ((sfi, nom) in fichiers) {
+                              val maxRec = if (sfi in sfiCompteurs) 1 else 3
+                              for (rec in 1..maxRec) {
+                                  val p2 = ((sfi shl 3) or 0x04).toByte()
+                                  val rep = it.transceive(byteArrayOf(cla.toByte(), 0xB2.toByte(),
+                                      rec.toByte(), p2, 0x00))
+                                  if (!ok(rep)) {
+                                      if (rec == 1) r.append("\n[$nom] SFI ${"%02X".format(sfi)} : ${sw(rep)}\n")
+                                      break
+                                  }
+                                  auMoinsUnOk = true
+                                  val data = rep.copyOf(rep.size - 2)
+                                  r.append("\n[$nom] SFI ${"%02X".format(sfi)} rec $rec\n${data.toHex()}\n")
+                                  if (sfi in sfiCompteurs) r.append(decoderCompteurs(data))
+                              }
+                          }
+                          if (auMoinsUnOk) break
+                      }
+                  }
+              }
+
+              private fun decoderCompteurs(d: ByteArray): String {
+                  val sb = StringBuilder()
+                  for (i in 0 until d.size / 3) {
+                      val v = ((d[i * 3].toInt() and 0xFF) shl 16) or
+                              ((d[i * 3 + 1].toInt() and 0xFF) shl 8) or
+                              (d[i * 3 + 2].toInt() and 0xFF)
+                      if (v != 0) sb.append("  -> compteur n°${i + 1} = $v\n")
+                  }
+                  return if (sb.isEmpty()) "  (tous les compteurs à 0)\n" else sb.toString()
+              }
+
+              private fun ok(r: ByteArray) = r.size >= 2 &&
+                  r[r.size - 2] == 0x90.toByte() && r[r.size - 1] == 0x00.toByte()
+
+              private fun sw(r: ByteArray): String {
+                  if (r.size < 2) return "réponse vide"
+                  val code = r.copyOfRange(r.size - 2, r.size).toHex().replace(" ", "")
+                  return code + when (code) {
+                      "9000" -> " (OK)"
+                      "6A82" -> " (fichier absent)"
+                      "6982" -> " (protégé par clé)"
+                      "6E00" -> " (classe refusée)"
+                      "6B00", "6A83" -> " (enregistrement absent)"
+                      else -> ""
+                  }
+              }
+
+              private fun ByteArray.toHex() = joinToString(" ") { "%02X".format(it) }
+
+              private fun hex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+          }
+          FIN_DU_FICHIER
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Compiler
+        run: |
+          gradle assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk LecteurTCL.apk
+      - name: Publier l'APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: derniere-version
+          name: Lecteur TCL
+          files: LecteurTCL.apk
+          make_latest: true
