@@ -49,8 +49,8 @@ jobs:
                   applicationId = "fr.perso.lecteurtcl"
                   minSdk = 24
                   targetSdk = 35
-                  versionCode = 2
-                  versionName = "0.2"
+                  versionCode = 3
+                  versionName = "1.0"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -87,70 +87,64 @@ jobs:
           package fr.perso.lecteurtcl
 
           import android.app.Activity
-          import android.content.ClipData
-          import android.content.ClipboardManager
+          import android.graphics.Color
           import android.graphics.Typeface
           import android.nfc.NfcAdapter
           import android.nfc.Tag
           import android.nfc.tech.IsoDep
-          import android.nfc.tech.NfcB
           import android.os.Bundle
-          import android.widget.Button
+          import android.view.Gravity
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import android.widget.TextView
-          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Locale
+          import java.util.TimeZone
 
-          // Version 0.2 : explorateur Calypso (plusieurs AID, sélection par chemin, scan des SFI)
+          // Lecteur TCL v1.0 : tickets restants + dernières validations (cartes Técély récentes)
           class MainActivity : Activity(), NfcAdapter.ReaderCallback {
 
               private var nfc: NfcAdapter? = null
-              private lateinit var output: TextView
+              private lateinit var titre: TextView
+              private lateinit var nombre: TextView
+              private lateinit var note: TextView
+              private lateinit var validations: TextView
+              private lateinit var details: TextView
 
-              private val aids = listOf(
-                  "315449432E494341" to "1TIC.ICA",
-                  "315449432E49434131" to "1TIC.ICA1",
-                  "A0000004040125090101" to "Calypso A0..0101",
-                  "A000000291" to "Calypso A000000291",
-                  "31544943" to "1TIC (partiel)",
-                  "A000000404" to "A000000404 (partiel)",
-              )
-              private val fids = listOf(
-                  0x2001 to "Environnement", 0x2010 to "Validations", 0x2020 to "Contrats",
-                  0x2030 to "Contrats 2", 0x2040 to "Evt speciaux", 0x2050 to "Liste contrats",
-                  0x2069 to "Compteurs", 0x202A to "Compteur A", 0x202B to "Compteur B",
-                  0x202C to "Compteur C", 0x202D to "Compteur D",
-              )
-              private val sfiCompteurs = setOf(0x19, 0x0A, 0x0B, 0x0C, 0x0D)
-              private val fidCompteurs = setOf(0x2069, 0x202A, 0x202B, 0x202C, 0x202D)
+              // Application billettique des cartes Técély récentes (sélection partielle)
+              private val aid = hex("A000000404")
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   nfc = NfcAdapter.getDefaultAdapter(this)
-                  output = TextView(this).apply {
-                      typeface = Typeface.MONOSPACE
-                      textSize = 12f
-                      setTextIsSelectable(true)
-                      setPadding(32, 32, 32, 32)
-                      text = when {
-                          nfc == null -> "Ce téléphone n'a pas de NFC."
-                          nfc?.isEnabled == false -> "Active le NFC dans les paramètres, puis reviens ici."
-                          else -> "Lecteur TCL v0.2\nPose ta carte au dos du téléphone et garde-la immobile…"
-                      }
+
+                  fun tv(size: Float, bold: Boolean = false, color: Int = Color.BLACK) = TextView(this).apply {
+                      textSize = size
+                      setTextColor(color)
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      if (bold) setTypeface(typeface, Typeface.BOLD)
+                      setPadding(32, 16, 32, 16)
                   }
-                  val copier = Button(this).apply {
-                      text = "Copier le résultat"
-                      setOnClickListener {
-                          val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                          cm.setPrimaryClip(ClipData.newPlainText("Lecture TCL", output.text))
-                          Toast.makeText(this@MainActivity, "Copié", Toast.LENGTH_SHORT).show()
-                      }
+                  titre = tv(20f, true)
+                  nombre = tv(96f, true, Color.rgb(200, 16, 46))
+                  note = tv(14f, color = Color.GRAY)
+                  validations = tv(17f)
+                  details = tv(11f, color = Color.GRAY).apply { typeface = Typeface.MONOSPACE; setTextIsSelectable(true) }
+
+                  titre.text = when {
+                      nfc == null -> "Ce téléphone n'a pas de NFC."
+                      nfc?.isEnabled == false -> "Active le NFC dans les paramètres, puis reviens ici."
+                      else -> "Pose ta carte TCL au dos du téléphone"
                   }
-                  setContentView(LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(0, 48, 0, 0)
-                      addView(copier)
-                      addView(ScrollView(this@MainActivity).apply { addView(output) })
+
+                  setContentView(ScrollView(this).apply {
+                      setBackgroundColor(Color.WHITE)
+                      addView(LinearLayout(this@MainActivity).apply {
+                          orientation = LinearLayout.VERTICAL
+                          setPadding(0, 96, 0, 48)
+                          listOf(titre, nombre, note, validations, details).forEach { addView(it) }
+                      })
                   })
               }
 
@@ -167,127 +161,77 @@ jobs:
               }
 
               override fun onTagDiscovered(tag: Tag) {
-                  runOnUiThread { output.text = "Lecture en cours, ne bouge pas la carte…" }
-                  val r = StringBuilder("Lecteur TCL v0.2\n")
                   try {
-                      lire(tag, r)
-                  } catch (e: Exception) {
-                      r.append("\nERREUR : ${e.message}\n(Carte bougée ? Réessaie en la gardant immobile.)")
-                  }
-                  runOnUiThread { output.text = r.toString() }
-              }
+                      val iso = IsoDep.get(tag) ?: return afficherErreur("Ce n'est pas une carte TCL.")
+                      iso.connect()
+                      iso.timeout = 3000
+                      iso.use { c ->
+                          val sel = c.transceive(byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, aid.size.toByte()) + aid + byteArrayOf(0x00))
+                          if (!ok(sel)) return afficherErreur("Carte non reconnue.\n(Les anciennes cartes Técély ne sont pas lisibles par un téléphone.)")
 
-              private fun lire(tag: Tag, r: StringBuilder) {
-                  r.append("UID : ${tag.id.toHex()}\n")
-                  r.append("Technos : ${tag.techList.joinToString { it.substringAfterLast('.') }}\n")
-                  NfcB.get(tag)?.let {
-                      r.append("NfcB appData : ${it.applicationData.toHex()}\n")
-                      r.append("NfcB protoInfo : ${it.protocolInfo.toHex()}\n")
-                  }
-                  val iso = IsoDep.get(tag) ?: run { r.append("\nCarte non ISO-DEP."); return }
-                  iso.connect()
-                  iso.timeout = 5000
-                  iso.hiLayerResponse?.let { r.append("HiLayer : ${it.toHex()}\n") }
-                  iso.historicalBytes?.let { r.append("Historical : ${it.toHex()}\n") }
+                          // Tickets : fichier SFI 05, compteurs de 3 octets
+                          val cpt = lireRecord(c, 0x05, 1)
+                          val restants = cpt?.let { val3(it, 0) } ?: 0
+                          val carnet = cpt?.let { val3(it, 2) } ?: 0
 
-                  iso.use { c ->
-                      for (cla in listOf(0x00, 0x94)) {
-                          val k = "%02X".format(cla)
-                          r.append("\n===== Classe $k =====\n")
+                          // Validations : fichier SFI 0A, 3 enregistrements (le plus récent d'abord)
+                          val evts = (1..3).mapNotNull { lireRecord(c, 0x0A, it) }.mapNotNull { dateValidation(it) }
 
-                          // 1) Sélection par AID
-                          for ((aidHex, nom) in aids) {
-                              val aid = hex(aidHex)
-                              val rep = c.transceive(byteArrayOf(cla.toByte(), 0xA4.toByte(), 0x04, 0x00,
-                                  aid.size.toByte()) + aid + byteArrayOf(0x00))
-                              r.append("AID $nom : ${sw(rep)}")
-                              if (ok(rep)) {
-                                  r.append("\n  FCI ${rep.copyOf(rep.size - 2).toHex()}\n")
-                                  scanSfi(c, cla, r)
-                              } else r.append("\n")
-                          }
-
-                          // 2) Sélection par chemin : MF 3F00 puis scan SFI
-                          val mf = select(c, cla, 0x3F00)
-                          r.append("\nSelect MF 3F00 : ${sw(mf)}\n")
-                          if (ok(mf)) scanSfi(c, cla, r)
-
-                          // 3) DF 2000 puis chaque EF par identifiant
-                          val df = select(c, cla, 0x2000)
-                          r.append("\nSelect DF 2000 : ${sw(df)}\n")
-                          if (ok(df)) {
-                              for ((fid, nom) in fids) {
-                                  val s = select(c, cla, fid)
-                                  if (!ok(s)) { r.append("  EF ${"%04X".format(fid)} $nom : ${sw(s)}\n"); continue }
-                                  for (rec in 1..3) {
-                                      val rep = c.transceive(byteArrayOf(cla.toByte(), 0xB2.toByte(), rec.toByte(), 0x04, 0x00))
-                                      if (!ok(rep)) { if (rec == 1) r.append("  EF ${"%04X".format(fid)} $nom : lecture ${sw(rep)}\n"); break }
-                                      val d = rep.copyOf(rep.size - 2)
-                                      r.append("  EF ${"%04X".format(fid)} $nom rec $rec\n  ${d.toHex()}\n")
-                                      if (fid in fidCompteurs) r.append(compteurs(d))
-                                  }
-                                  select(c, cla, 0x2000)
+                          runOnUiThread {
+                              titre.text = "Tickets restants"
+                              nombre.text = restants.toString()
+                              note.text = when {
+                                  restants == 0 -> "Aucun ticket à l'unité (abonnement ou carnet vide)"
+                                  carnet > 0 -> "sur un carnet de $carnet"
+                                  else -> ""
                               }
+                              validations.text = if (evts.isEmpty()) "Aucune validation enregistrée"
+                                  else "Dernières validations\n\n" + evts.joinToString("\n")
+                              details.text = "\n\nSFI 05 : ${cpt?.copyOf(12)?.toHex() ?: "illisible"}"
                           }
                       }
+                  } catch (e: Exception) {
+                      afficherErreur("Lecture interrompue.\nGarde la carte immobile et réessaie.")
                   }
               }
 
-              /** Lit l'enregistrement 1 (à 3) des SFI 1 à 30 et n'affiche que ce qui répond. */
-              private fun scanSfi(c: IsoDep, cla: Int, r: StringBuilder) {
-                  var trouves = 0
-                  val erreurs = mutableMapOf<String, Int>()
-                  for (sfi in 1..30) {
-                      for (rec in 1..3) {
-                          val rep = c.transceive(byteArrayOf(cla.toByte(), 0xB2.toByte(), rec.toByte(),
-                              ((sfi shl 3) or 0x04).toByte(), 0x00))
-                          if (!ok(rep)) {
-                              if (rec == 1) { val e = sw(rep); erreurs[e] = (erreurs[e] ?: 0) + 1 }
-                              break
-                          }
-                          trouves++
-                          val d = rep.copyOf(rep.size - 2)
-                          r.append("  SFI ${"%02X".format(sfi)} rec $rec\n  ${d.toHex()}\n")
-                          if (sfi in sfiCompteurs) r.append(compteurs(d))
-                      }
-                  }
-                  r.append("  -> $trouves enregistrement(s) lu(s)")
-                  if (erreurs.isNotEmpty()) r.append(", refus : ${erreurs.entries.joinToString { "${it.key} x${it.value}" }}")
-                  r.append("\n")
+              private fun afficherErreur(msg: String) = runOnUiThread {
+                  titre.text = msg
+                  nombre.text = ""; note.text = ""; validations.text = ""; details.text = ""
               }
 
-              private fun select(c: IsoDep, cla: Int, fid: Int): ByteArray =
-                  c.transceive(byteArrayOf(cla.toByte(), 0xA4.toByte(), 0x00, 0x00, 0x02,
-                      (fid shr 8).toByte(), fid.toByte()))
-
-              private fun compteurs(d: ByteArray): String {
-                  val sb = StringBuilder()
-                  for (i in 0 until d.size / 3) {
-                      val v = ((d[i * 3].toInt() and 0xFF) shl 16) or
-                              ((d[i * 3 + 1].toInt() and 0xFF) shl 8) or (d[i * 3 + 2].toInt() and 0xFF)
-                      if (v != 0) sb.append("    -> compteur n°${i + 1} = $v\n")
-                  }
-                  return if (sb.isEmpty()) "    (compteurs à 0)\n" else sb.toString()
+              private fun lireRecord(c: IsoDep, sfi: Int, rec: Int): ByteArray? {
+                  val r = c.transceive(byteArrayOf(0x00, 0xB2.toByte(), rec.toByte(), ((sfi shl 3) or 0x04).toByte(), 0x00))
+                  return if (ok(r)) r.copyOf(r.size - 2) else null
               }
 
-              private fun ok(r: ByteArray) = r.size >= 2 &&
-                  r[r.size - 2] == 0x90.toByte() && r[r.size - 1] == 0x00.toByte()
-
-              private fun sw(r: ByteArray): String {
-                  if (r.size < 2) return "vide"
-                  val code = r.copyOfRange(r.size - 2, r.size).toHex().replace(" ", "")
-                  return code + when (code) {
-                      "9000" -> " OK"
-                      "6A82" -> " absent"
-                      "6982" -> " protégé"
-                      "6E00" -> " classe refusée"
-                      "6D00" -> " commande inconnue"
-                      "6B00", "6A83" -> " enreg. absent"
-                      "6986" -> " pas de fichier courant"
-                      else -> ""
+              /** Date (14 bits, jours depuis le 01/01/1997) + heure (11 bits, minutes), à partir du bit 16. */
+              private fun dateValidation(d: ByteArray): String? {
+                  val jours = bits(d, 16, 14)
+                  val minutes = bits(d, 30, 11)
+                  if (jours == 0 || minutes >= 1440) return null
+                  val cal = Calendar.getInstance(TimeZone.getTimeZone("Europe/Paris")).apply {
+                      clear(); set(1997, Calendar.JANUARY, 1); add(Calendar.DAY_OF_MONTH, jours)
                   }
+                  val jour = SimpleDateFormat("EEE d MMM yyyy", Locale.FRANCE).apply { timeZone = cal.timeZone }.format(cal.time)
+                  return "$jour à ${minutes / 60}h${"%02d".format(minutes % 60)}"
               }
 
+              private fun bits(d: ByteArray, debut: Int, n: Int): Int {
+                  var v = 0
+                  for (i in debut until debut + n) {
+                      val octet = d.getOrNull(i / 8)?.toInt() ?: return 0
+                      v = (v shl 1) or ((octet shr (7 - i % 8)) and 1)
+                  }
+                  return v
+              }
+
+              private fun val3(d: ByteArray, i: Int): Int {
+                  if (d.size < i * 3 + 3) return 0
+                  return ((d[i * 3].toInt() and 0xFF) shl 16) or ((d[i * 3 + 1].toInt() and 0xFF) shl 8) or (d[i * 3 + 2].toInt() and 0xFF)
+              }
+
+              private fun ok(r: ByteArray) = r.size >= 2 && r[r.size - 2] == 0x90.toByte() && r[r.size - 1] == 0x00.toByte()
               private fun ByteArray.toHex() = joinToString(" ") { "%02X".format(it) }
               private fun hex(s: String) = ByteArray(s.length / 2) { s.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
           }
